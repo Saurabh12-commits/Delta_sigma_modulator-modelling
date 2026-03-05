@@ -1,0 +1,225 @@
+clear all;
+clc;
+%Matlab simulation of third order delta sigma modulator
+
+%% parameters
+Fs = 16384;
+f1 = 23;
+N = 16384;
+n = (0:2*N-1)/Fs;
+bits = 6;
+nlevel = 2^bits;
+f = (0:N/2-1);
+t = 0:16384; 
+osr = 128;
+fB = Fs/(2*osr);
+amp = [-100:2:0];
+OBG = 1.5;
+order = 3;
+ntf = synthesizeNTF(order,osr,0,OBG,0);
+
+
+v = zeros(1,2*N);
+v_dac = zeros(1,2*N);
+
+%% calculate sutff
+
+[a,g,b,c] = realizeNTF(ntf,'CIFF');
+ABCD = stuffABCD(a,g,b,c,'CIFF');
+
+%% simulateSNR
+
+sqnr= simulateSNR(ABCD,osr,amp,0,nlevel,1/(2*osr),log2(N),0);
+plot(amp, sqnr, '-b', 'LineWidth', 1.5);
+hold on;
+plot(amp, sqnr, '*', 'MarkerSize', 6)  
+grid on;
+hold off;
+max(sqnr)
+
+% input signal
+sqnr_max = max(sqnr);
+index = 0;
+for i =1:51
+    if sqnr(i) == sqnr_max
+        index = i;
+    end
+end
+msa = amp(index);
+sigma_t=0;
+% delta_t = sigma_t * randn(2*N,1);
+% delta_t=transpose(delta_t);
+n2=n+transpose((sigma_t*randn(2*N,1))*(1/Fs));
+u = (10^(msa/20))*(nlevel - 1)*sin(2*pi*f1*n2);
+% u=zeros(1,2*N);
+% u=ones(1,2*N)*1.6384;
+% u=sin(2*pi*f1*n);
+
+x1 = zeros(1,2*N);
+x2 = zeros(1,2*N);
+x3 = zeros(1,2*N);
+y1= zeros(1,2*N);
+y = zeros(1,2*N);
+levels=zeros(1,nlevel);
+for i=1:nlevel
+    levels(i)=-nlevel+2*i-1;
+end    
+
+ sigma=0.1;
+% there is standard deviation of 0.3
+% sigma=0;
+% there is no mismatch 
+x = 2 + sigma * randn(1, nlevel); 
+% x=[2.1 1.901 2.23 1.98];
+% giving fixed mismatch 
+
+
+
+%% DSM
+pointer=0;
+for k = 2:2*N
+    sum1=0;
+
+    % Integrators
+    x1(k) = x1(k-1) + b(1)*u(k) - c(1)*(y1(k-1));
+    x2(k) = x2(k-1) + c(2)*x1(k) + b(2)*u(k);
+    x3(k) = x3(k-1) + c(3)*x2(k) + b(3)*u(k);
+
+    % Feedforward summer
+    v = a(1)*x1(k) + a(2)*x2(k) + a(3)*x3(k) + b(4)*u(k);
+
+    % Quantizer
+    [~,idx] = min(abs(v - levels));
+    y(k) = levels(idx);
+    for j = 1:idx
+        elem_index = mod(pointer + j - 1, nlevel) + 1;   % circular index
+    sum1 = sum1 + x(elem_index);
+    end
+     pointer = mod(pointer + idx, nlevel);
+    % Applying pointer for DWA
+
+    y1(k)=sum1-(nlevel+1);
+    % y(k)=levels(idx);
+          
+end
+
+%% time domain plot
+figure;
+t = 1:2048; 
+stairs(t, u(t+1),'g'); hold on; 
+stairs(t,y(t+1),'b');  
+ylabel('u, v'); 
+title ('time domain input(green) and output(blue) of DSM');
+j = simulateDSM(u, ABCD, nlevel);
+X_h2=fft(j(1:N).*ds_hann(N))/(sqrt(N*sum(ds_hann(N).^2)));
+mag_Xh2=abs(X_h2);
+
+
+
+%% spectrum analysis
+% w_hann = sum(ds_hann(N).^2)/N;
+Xh = fft(y(1:N).*ds_hann(N))/(sqrt(N*sum(ds_hann(N).^2)));  % power correction
+mag_Xh = abs(Xh);
+% % Xh = fft(v(1:N).*ds_hann(N))/(sum(ds_hann(N))/4); % amplitude correction
+
+figure;
+plot(10*log10(f),20*log(abs(Xh(1:N/2))));
+grid on;
+% manual power calculation
+signal_power = 2*sum(mag_Xh((f1-3:f1+5)).^2);
+total_power = 2*sum(abs(Xh(4:fB)).^2);
+noise_power = total_power - signal_power;
+snr_manual_calculated = 10*log10(signal_power/noise_power)
+
+%% filtering 
+filter_order = 256;
+wn = 1/(2*osr);
+h = fir1(filter_order,wn,hann(filter_order+1));
+h_norm  = h / sum(h);
+% % h_quant_norm =fi(h_norm, 1, 16, 15);   % signed, 16-bit word, 15-bit fraction
+% % v_filtered_trunc_delayed = filter(h_quant_norm,1,fi(v,1,16,15));
+
+B = 20;                     % number of coefficient bits
+scale = 2^(B-1);  
+h_quant = round(h.*scale)/scale;   % truncated / quantized coefficients
+h_quant_norm = h_quant / sum(h_quant);
+
+v_filtered_trunc_delayed_o = filter(h_quant_norm,1,y);
+v_filtered_trunc_delayed=round(v_filtered_trunc_delayed_o.*scale)/scale;
+
+
+
+
+v_filtered_delayed = filter(h_norm,1,y);
+delay = filter_order/2;
+v_filtered = v_filtered_delayed(delay+1+2000:delay+N+2000);
+v_filtered_trunc = v_filtered_trunc_delayed(delay+1+2000:delay+N+2000);
+figure;
+stairs(t, v_filtered_delayed(t+1),'b'); hold on;
+stairs(t, v_filtered_trunc_delayed(t+1),'r');
+legend('Ideal filter','Truncated coeff filter');
+title('Effect of coefficient truncation');
+grid on;
+
+%% plotting of input and filter output
+
+figure;
+plot(t,u(t+1),'b');
+hold on;
+plot(t,v_filtered(t+1),'r');
+title 'time domain';
+grid on;
+legend('input signal (u)', ' filter output (v filtered)');
+% N_changed = pow2(floor(log2(length(v_filtered))));
+% frequency domain
+u_ffth = fft(u(1:N).*ds_hann(N)) / (sqrt(N*sum(ds_hann(N).^2)));
+v_filtered_ffth = fft(v_filtered(1:N).*ds_hann(N))/ (sqrt(N*sum(ds_hann(N).^2)));
+v_filtered_trunc_ffth = fft(double(v_filtered_trunc(1:N).*ds_hann(N)))/ (sqrt(N*sum(ds_hann(N).^2)));
+
+figure;
+semilogx(f,10*log10(abs(u_ffth(f+1))),'r');
+hold on;
+semilogx(f,20*log(mag_Xh(f+1)),'g');
+semilogx(f,10*log10(abs(v_filtered_ffth(f+1))),'b');
+semilogx(f,10*log10(abs(v_filtered_trunc_ffth(f+1))));
+grid on;
+legend ('input signal','DSM output without filtering' ,'filtered ouput after DSM','filtered output with trucated coefficient');
+
+% manual power after filtering calculation
+filtered_signal_power = 2*sum(abs(v_filtered_ffth(f1:f1+2).^2));
+filtered_total_power = 2*sum(abs(v_filtered_ffth(4:N/2)).^2);
+filtered_noise_power = filtered_total_power - filtered_signal_power;
+snr_after_filtering = 10*log10(filtered_signal_power/filtered_noise_power)
+
+% power calculation for filter output with trucated filter coefficiet
+filtered_signal_power_trunc = 2*sum(abs(v_filtered_trunc_ffth(f1:f1+2).^2));
+filtered_total_power_trunc = 2*sum(abs(v_filtered_trunc_ffth(4:N/2).^2));
+filtered_noise_power_trunc = filtered_total_power_trunc - filtered_signal_power_trunc;
+snr_after_filtering_trunc = 10*log10(filtered_signal_power_trunc/filtered_noise_power_trunc)
+
+%% decimation
+figure;
+v_decimated = decimate(v_filtered(1:N),osr,'fir');
+t1 = (0:osr:N-1);
+stairs(t, u(t+1),'g'); hold on; 
+stairs(t1,v_decimated(1:length(t1)));
+xlim ([0 length(t)-1]);
+title 'time domain comparision of input and output after decimation'
+figure;
+v_decimated_hann = v_decimated.*ds_hann(length(v_decimated)); 
+v_decimated_fft = abs(fft(v_decimated_hann,length(v_decimated)))/(sqrt(length(v_decimated)*sum(ds_hann(length(v_decimated)).^2)));
+f_axis_new = (0:(length(v_decimated_fft)/2)-1);
+plot(f_axis_new,10*log10(abs(v_decimated_fft(1:length(v_decimated_fft)/2))));
+title 'frequency domain comparision of input and output after decimation'
+
+% manual power after filtering calculation
+decimated_signal_power = 2*sum(abs(v_decimated_fft(f1:f1+2)).^2);
+decimated_total_power = 2*sum(abs(v_decimated_fft(4:fB)).^2);
+decimated_noise_power = decimated_total_power - decimated_signal_power;
+snr_after_decimation = 10*log10((decimated_signal_power/decimated_noise_power))
+
+
+simulated_signal_power = 2*sum(abs(X_h2(f1:f1+2)).^2);
+simulated_total_power = 2*sum(abs(X_h2(4:fB)).^2);
+simulated_noise_power = simulated_total_power - simulated_signal_power;
+snr_after_simulation= 10*log10((simulated_signal_power/simulated_noise_power))
